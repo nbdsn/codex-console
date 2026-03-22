@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ssl
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional, Set
@@ -27,6 +28,7 @@ class TelegramBotManager:
         self._update_offset: int = 0
         self._active_batch_ids: Set[str] = set()
         self._batch_watchers: Dict[str, asyncio.Task] = {}
+        self._insecure_ssl_fallback: bool = False
 
     async def start(self) -> None:
         """启动 TG 机器人（配置完整时）。"""
@@ -69,6 +71,19 @@ class TelegramBotManager:
     def _api_url(token: str, method: str) -> str:
         return f"https://api.telegram.org/bot{token}/{method}"
 
+    @staticmethod
+    def _make_ssl_context(verify: bool = True) -> ssl.SSLContext:
+        if verify:
+            return ssl.create_default_context()
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+    @staticmethod
+    def _is_cert_error(err: Exception) -> bool:
+        return "CERTIFICATE_VERIFY_FAILED" in str(err)
+
     def _request(self, token: str, method: str, payload: Optional[dict] = None) -> Dict[str, Any]:
         url = self._api_url(token, method)
         headers = {"Content-Type": "application/json"}
@@ -76,16 +91,36 @@ class TelegramBotManager:
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=35) as resp:
-            body = resp.read().decode("utf-8")
-            return json.loads(body)
+        verify = not self._insecure_ssl_fallback
+        try:
+            with urllib.request.urlopen(req, timeout=35, context=self._make_ssl_context(verify=verify)) as resp:
+                body = resp.read().decode("utf-8")
+                return json.loads(body)
+        except Exception as e:
+            if verify and self._is_cert_error(e):
+                self._insecure_ssl_fallback = True
+                logger.warning("Telegram SSL 证书校验失败，已自动切换为兼容模式（不校验证书）")
+                with urllib.request.urlopen(req, timeout=35, context=self._make_ssl_context(verify=False)) as resp:
+                    body = resp.read().decode("utf-8")
+                    return json.loads(body)
+            raise
 
     def _request_get(self, token: str, method: str, params: Optional[dict] = None) -> Dict[str, Any]:
         query = f"?{urllib.parse.urlencode(params or {})}" if params else ""
         url = f"{self._api_url(token, method)}{query}"
-        with urllib.request.urlopen(url, timeout=40) as resp:
-            body = resp.read().decode("utf-8")
-            return json.loads(body)
+        verify = not self._insecure_ssl_fallback
+        try:
+            with urllib.request.urlopen(url, timeout=40, context=self._make_ssl_context(verify=verify)) as resp:
+                body = resp.read().decode("utf-8")
+                return json.loads(body)
+        except Exception as e:
+            if verify and self._is_cert_error(e):
+                self._insecure_ssl_fallback = True
+                logger.warning("Telegram SSL 证书校验失败，已自动切换为兼容模式（不校验证书）")
+                with urllib.request.urlopen(url, timeout=40, context=self._make_ssl_context(verify=False)) as resp:
+                    body = resp.read().decode("utf-8")
+                    return json.loads(body)
+            raise
 
     async def _safe_request(self, token: str, method: str, payload: Optional[dict] = None) -> Dict[str, Any]:
         return await asyncio.to_thread(self._request, token, method, payload)
