@@ -25,6 +25,7 @@ class SettingCategory(str, Enum):
     CUSTOM_DOMAIN = "moe_mail"
     SECURITY = "security"
     CPA = "cpa"
+    TELEGRAM = "telegram"
 
 
 @dataclass
@@ -382,6 +383,20 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         category=SettingCategory.EMAIL,
         description="Outlook OAuth 默认 Client ID"
     ),
+    # Telegram Bot 配置
+    "telegram_bot_token": SettingDefinition(
+        db_key="telegram.bot_token",
+        default_value="",
+        category=SettingCategory.TELEGRAM,
+        description="Telegram Bot Token",
+        is_secret=True
+    ),
+    "telegram_admin_id": SettingDefinition(
+        db_key="telegram.admin_id",
+        default_value="",
+        category=SettingCategory.TELEGRAM,
+        description="Telegram 管理员 ID"
+    ),
 }
 
 # 属性名到数据库键名的映射（用于向后兼容）
@@ -410,6 +425,7 @@ SETTING_TYPES: Dict[str, Type] = {
     "outlook_provider_priority": list,
     "outlook_health_failure_threshold": int,
     "outlook_health_disable_duration": int,
+    "telegram_admin_id": str,
 }
 
 # 需要作为 SecretStr 处理的字段
@@ -698,6 +714,10 @@ class Settings(BaseModel):
     outlook_health_failure_threshold: int = 5
     outlook_health_disable_duration: int = 60
     outlook_default_client_id: str = "24d9a0ed-8787-4584-883c-2fd79308940a"
+
+    # Telegram Bot 配置
+    telegram_bot_token: SecretStr = SecretStr("")
+    telegram_admin_id: str = ""
 
 
 # 全局配置实例

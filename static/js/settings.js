@@ -71,7 +71,9 @@ const elements = {
     // Outlook 设置
     outlookSettingsForm: document.getElementById('outlook-settings-form'),
     // Web UI 访问控制
-    webuiSettingsForm: document.getElementById('webui-settings-form')
+    webuiSettingsForm: document.getElementById('webui-settings-form'),
+    // Telegram Bot 设置
+    tgSettingsForm: document.getElementById('tg-settings-form')
 };
 
 // 选中的服务 ID
@@ -247,6 +249,9 @@ function initEventListeners() {
     if (elements.webuiSettingsForm) {
         elements.webuiSettingsForm.addEventListener('submit', handleSaveWebuiSettings);
     }
+    if (elements.tgSettingsForm) {
+        elements.tgSettingsForm.addEventListener('submit', handleSaveTelegramSettings);
+    }
     // Team Manager 服务管理
     if (elements.addTmServiceBtn) {
         elements.addTmServiceBtn.addEventListener('click', () => openTmServiceModal());
@@ -349,6 +354,17 @@ async function loadSettings() {
                 input.placeholder = '已配置，留空保持不变';
             }
         }
+        if (data.telegram) {
+            const tokenInput = document.getElementById('tg-bot-token');
+            const adminInput = document.getElementById('tg-admin-id');
+            if (tokenInput) {
+                tokenInput.value = '';
+                tokenInput.placeholder = data.telegram.has_bot_token ? '已配置，留空保持不变' : '请输入 Telegram Bot Token';
+            }
+            if (adminInput) {
+                adminInput.value = data.telegram.admin_id || '';
+            }
+        }
 
     } catch (error) {
         console.error('加载设置失败:', error);
@@ -372,6 +388,27 @@ async function handleSaveWebuiSettings(e) {
     } catch (error) {
         console.error('保存 Web UI 设置失败:', error);
         toast.error('保存 Web UI 设置失败');
+    }
+}
+
+// 保存 Telegram Bot 设置
+async function handleSaveTelegramSettings(e) {
+    e.preventDefault();
+
+    const botToken = document.getElementById('tg-bot-token').value;
+    const adminId = document.getElementById('tg-admin-id').value.trim();
+    const payload = {
+        bot_token: botToken || null,
+        admin_id: adminId
+    };
+
+    try {
+        await api.post('/settings/telegram', payload);
+        toast.success('Telegram Bot 设置已更新');
+        document.getElementById('tg-bot-token').value = '';
+    } catch (error) {
+        console.error('保存 Telegram 设置失败:', error);
+        toast.error('保存 Telegram 设置失败');
     }
 }
 

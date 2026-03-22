@@ -149,6 +149,28 @@
                         </form>
                     </div>
                 </div>
+
+                <div class="card" style="margin-top: var(--spacing-lg);">
+                    <div class="card-header">
+                        <h3>Telegram Bot</h3>
+                        <span class="hint">配置后可通过 Telegram 管理注册任务（仅管理员可用）</span>
+                    </div>
+                    <div class="card-body">
+                        <form id="tg-settings-form">
+                            <div class="form-group">
+                                <label for="tg-bot-token">Bot Token</label>
+                                <input type="password" id="tg-bot-token" name="bot_token" placeholder="留空保持不变" autocomplete="new-password">
+                            </div>
+                            <div class="form-group">
+                                <label for="tg-admin-id">管理员 ID</label>
+                                <input type="text" id="tg-admin-id" name="admin_id" placeholder="例如: 123456789">
+                            </div>
+                            <div class="form-actions">
+                                <button type="submit" class="btn btn-primary">💾 保存并重载 Bot</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
             </div>
 
             <!-- 添加代理模态框 -->

@@ -103,6 +103,7 @@ a = Analysis(
         'src.core.upload.cpa_upload',
         'src.core.upload.sub2api_upload',
         'src.core.upload.team_manager_upload',
+        'src.services.telegram_bot',
         'src.web.routes.accounts',
         'src.web.routes.email',
         'src.web.routes.registration',

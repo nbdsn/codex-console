@@ -21,6 +21,7 @@ from ..config.settings import get_settings
 from .routes import api_router
 from .routes.websocket import router as ws_router
 from .task_manager import task_manager
+from ..services.telegram_bot import telegram_bot_manager
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,7 @@ def create_app() -> FastAPI:
         # 设置 TaskManager 的事件循环
         loop = asyncio.get_event_loop()
         task_manager.set_loop(loop)
+        await telegram_bot_manager.start()
 
         logger.info("=" * 50)
         logger.info(f"{settings.app_name} v{settings.app_version} 启动中，程序正在伸懒腰...")
@@ -192,6 +194,7 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     async def shutdown_event():
         """应用关闭事件"""
+        await telegram_bot_manager.stop()
         logger.info("应用关闭，今天先收摊啦")
 
     return app

@@ -59,6 +59,12 @@ class WebUISettings(BaseModel):
     access_password: Optional[str] = None
 
 
+class TelegramSettings(BaseModel):
+    """Telegram Bot 设置"""
+    bot_token: Optional[str] = None
+    admin_id: Optional[str] = None
+
+
 class AllSettings(BaseModel):
     """所有设置"""
     proxy: ProxySettings
@@ -99,6 +105,10 @@ async def get_all_settings():
             "port": settings.webui_port,
             "debug": settings.debug,
             "has_access_password": bool(settings.webui_access_password and settings.webui_access_password.get_secret_value()),
+        },
+        "telegram": {
+            "admin_id": settings.telegram_admin_id,
+            "has_bot_token": bool(settings.telegram_bot_token and settings.telegram_bot_token.get_secret_value()),
         },
         "tempmail": {
             "base_url": settings.tempmail_base_url,
@@ -240,6 +250,23 @@ async def update_webui_settings(request: WebUISettings):
 
     update_settings(**update_dict)
     return {"success": True, "message": "Web UI 设置已更新"}
+
+
+@router.post("/telegram")
+async def update_telegram_settings(request: TelegramSettings):
+    """更新 Telegram Bot 设置"""
+    update_dict = {}
+    if request.bot_token is not None:
+        update_dict["telegram_bot_token"] = request.bot_token.strip()
+    if request.admin_id is not None:
+        update_dict["telegram_admin_id"] = request.admin_id.strip()
+
+    update_settings(**update_dict)
+
+    # 配置更新后立即重载 TG Bot
+    from ...services.telegram_bot import telegram_bot_manager
+    await telegram_bot_manager.reload()
+    return {"success": True, "message": "Telegram Bot 设置已更新"}
 
 
 @router.get("/database")
