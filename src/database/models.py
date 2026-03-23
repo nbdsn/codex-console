@@ -52,6 +52,10 @@ class Account(Base):
     extra_data = Column(JSONEncodedDict)  # 额外信息存储
     cpa_uploaded = Column(Boolean, default=False)  # 是否已上传到 CPA
     cpa_uploaded_at = Column(DateTime)  # 上传时间
+    sub2api_uploaded = Column(Boolean, default=False)  # 是否已上传到 Sub2API
+    sub2api_uploaded_at = Column(DateTime)  # Sub2API 上传时间
+    tm_uploaded = Column(Boolean, default=False)  # 是否已上传到 Team Manager
+    tm_uploaded_at = Column(DateTime)  # Team Manager 上传时间
     source = Column(String(20), default='register')  # 'register' 或 'login'，区分账号来源
     subscription_type = Column(String(20))  # None / 'plus' / 'team'
     subscription_at = Column(DateTime)  # 订阅开通时间
@@ -76,6 +80,10 @@ class Account(Base):
             'proxy_used': self.proxy_used,
             'cpa_uploaded': self.cpa_uploaded,
             'cpa_uploaded_at': self.cpa_uploaded_at.isoformat() if self.cpa_uploaded_at else None,
+            'sub2api_uploaded': self.sub2api_uploaded,
+            'sub2api_uploaded_at': self.sub2api_uploaded_at.isoformat() if self.sub2api_uploaded_at else None,
+            'tm_uploaded': self.tm_uploaded,
+            'tm_uploaded_at': self.tm_uploaded_at.isoformat() if self.tm_uploaded_at else None,
             'source': self.source,
             'subscription_type': self.subscription_type,
             'subscription_at': self.subscription_at.isoformat() if self.subscription_at else None,

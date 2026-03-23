@@ -5,12 +5,12 @@
 
 // 状态
 let currentPage = 1;
-let pageSize = 20;
+let pageSize = 500;
 let totalAccounts = 0;
 let selectedAccounts = new Set();
 let isLoading = false;
 let selectAllPages = false;  // 是否选中了全部页
-let currentFilters = { status: '', email_service: '', search: '' };  // 当前筛选条件
+let currentFilters = { status: '', email_service: '', category: '', search: '' };  // 当前筛选条件
 
 // DOM 元素
 const elements = {
@@ -21,6 +21,8 @@ const elements = {
     failedAccounts: document.getElementById('failed-accounts'),
     filterStatus: document.getElementById('filter-status'),
     filterService: document.getElementById('filter-service'),
+    filterCategory: document.getElementById('filter-category'),
+    pageSize: document.getElementById('page-size'),
     searchInput: document.getElementById('search-input'),
     refreshBtn: document.getElementById('refresh-btn'),
     batchRefreshBtn: document.getElementById('batch-refresh-btn'),
@@ -41,6 +43,12 @@ const elements = {
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
+    if (elements.pageSize) {
+        const selectedSize = parseInt(elements.pageSize.value, 10);
+        if (!Number.isNaN(selectedSize)) {
+            pageSize = selectedSize;
+        }
+    }
     loadStats();
     loadAccounts();
     initEventListeners();
@@ -58,6 +66,20 @@ function initEventListeners() {
     });
 
     elements.filterService.addEventListener('change', () => {
+        currentPage = 1;
+        resetSelectAllPages();
+        loadAccounts();
+    });
+
+    elements.filterCategory.addEventListener('change', () => {
+        currentPage = 1;
+        resetSelectAllPages();
+        loadAccounts();
+    });
+
+    elements.pageSize.addEventListener('change', () => {
+        const newSize = parseInt(elements.pageSize.value, 10);
+        pageSize = Number.isNaN(newSize) ? 500 : Math.min(500, Math.max(1, newSize));
         currentPage = 1;
         resetSelectAllPages();
         loadAccounts();
@@ -223,6 +245,7 @@ async function loadAccounts() {
     // 记录当前筛选条件
     currentFilters.status = elements.filterStatus.value;
     currentFilters.email_service = elements.filterService.value;
+    currentFilters.category = elements.filterCategory.value;
     currentFilters.search = elements.searchInput.value.trim();
 
     const params = new URLSearchParams({
@@ -240,6 +263,10 @@ async function loadAccounts() {
 
     if (currentFilters.search) {
         params.append('search', currentFilters.search);
+    }
+
+    if (currentFilters.category) {
+        params.append('category', currentFilters.category);
     }
 
     try {
@@ -421,6 +448,7 @@ function buildBatchPayload(extraFields = {}) {
             select_all: true,
             status_filter: currentFilters.status || null,
             email_service_filter: currentFilters.email_service || null,
+            category_filter: currentFilters.category || null,
             search_filter: currentFilters.search || null,
             ...extraFields
         };

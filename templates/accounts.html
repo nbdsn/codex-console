@@ -112,10 +112,25 @@
                             <option value="moe_mail">MoeMail</option>
                         </select>
 
+                        <select id="filter-category" class="form-select">
+                            <option value="">全部账号</option>
+                            <option value="registered_only">仅注册</option>
+                            <option value="cpa">上传到 CPA</option>
+                            <option value="sub2api">上传到 Sub2API</option>
+                            <option value="team">上传到 Team Manager</option>
+                        </select>
+
                         <input type="text" id="search-input" class="form-input" placeholder="🔍 搜索邮箱..." style="min-width: 200px;">
                     </div>
 
                     <div class="toolbar-right">
+                        <select id="page-size" class="form-select" title="每页显示数量">
+                            <option value="20">每页 20</option>
+                            <option value="50">每页 50</option>
+                            <option value="100">每页 100</option>
+                            <option value="200">每页 200</option>
+                            <option value="500" selected>每页 500</option>
+                        </select>
                         <button class="btn btn-ghost" id="refresh-btn" title="刷新">
                             🔄 刷新
                         </button>

@@ -35,6 +35,8 @@ let wsHeartbeatInterval = null;  // 心跳定时器
 let batchWsHeartbeatInterval = null;  // 批量任务心跳定时器
 let activeTaskUuid = null;   // 当前活跃的单任务 UUID（用于页面重新可见时重连）
 let activeBatchId = null;    // 当前活跃的批量任务 ID（用于页面重新可见时重连）
+let batchLogLastIndex = 0;   // 批量日志已展示游标
+const ACTIVE_TASK_STORAGE_KEY = 'activeRegistrationTask';
 
 // DOM 元素
 const elements = {
@@ -510,7 +512,7 @@ async function handleSingleRegistration(requestData) {
         currentTask = data;
         activeTaskUuid = data.task_uuid;  // 保存用于重连
         // 持久化到 sessionStorage，跨页面导航后可恢复
-        sessionStorage.setItem('activeTask', JSON.stringify({ task_uuid: data.task_uuid, mode: 'single' }));
+        localStorage.setItem(ACTIVE_TASK_STORAGE_KEY, JSON.stringify({ task_uuid: data.task_uuid, mode: 'single' }));
         addLog('info', `[系统] 任务已创建: ${data.task_uuid}`);
         showTaskStatus(data);
         updateTaskStatus('running');
@@ -661,6 +663,11 @@ async function handleBatchRegistration(requestData) {
     toastShown = false;  // 重置 toast 标志
 
     const count = parseInt(elements.batchCount.value) || 5;
+    if (count < 1 || count > 2000000) {
+        toast.error('注册数量必须在 1-2000000 之间');
+        resetButtons();
+        return;
+    }
     const intervalMin = parseInt(elements.intervalMin.value) || 5;
     const intervalMax = parseInt(elements.intervalMax.value) || 30;
     const concurrency = parseInt(elements.concurrencyCount.value) || 3;
@@ -680,7 +687,7 @@ async function handleBatchRegistration(requestData) {
         currentBatch = data;
         activeBatchId = data.batch_id;  // 保存用于重连
         // 持久化到 sessionStorage，跨页面导航后可恢复
-        sessionStorage.setItem('activeTask', JSON.stringify({ batch_id: data.batch_id, mode: 'batch', total: data.count }));
+        localStorage.setItem(ACTIVE_TASK_STORAGE_KEY, JSON.stringify({ batch_id: data.batch_id, mode: 'batch', total: data.count }));
         addLog('info', `[系统] 批量任务已创建: ${data.batch_id}`);
         addLog('info', `[系统] 共 ${data.count} 个任务已加入队列`);
         showBatchStatus(data);
@@ -697,6 +704,11 @@ async function handleBatchRegistration(requestData) {
 
 // 取消任务
 async function handleCancelTask() {
+    const confirmed = await confirm('确定要停止当前进行中的任务吗？');
+    if (!confirmed) {
+        return;
+    }
+
     // 禁用取消按钮，防止重复点击
     elements.cancelBtn.disabled = true;
     addLog('info', '[系统] 正在提交取消请求...');
@@ -817,10 +829,12 @@ function stopLogPolling() {
 
 // 开始轮询批量状态
 function startBatchPolling(batchId) {
+    batchLogLastIndex = 0;
     batchPollingInterval = setInterval(async () => {
         try {
             const data = await api.get(`/registration/batch/${batchId}`);
             updateBatchProgress(data);
+            appendBatchLogs(data.logs || []);
 
             // 检查是否完成
             if (data.finished) {
@@ -895,6 +909,17 @@ function showBatchStatus(batch) {
     // 重置计数器
     elements.batchSuccess.dataset.last = '0';
     elements.batchFailed.dataset.last = '0';
+    batchLogLastIndex = 0;
+}
+
+function appendBatchLogs(logs) {
+    if (!Array.isArray(logs) || logs.length === 0) return;
+    for (let i = batchLogLastIndex; i < logs.length; i++) {
+        const log = logs[i];
+        const logType = getLogType(log);
+        addLog(logType, log);
+    }
+    batchLogLastIndex = logs.length;
 }
 
 // 更新批量进度
@@ -1060,7 +1085,7 @@ function resetButtons() {
     activeTaskUuid = null;
     activeBatchId = null;
     // 清除 sessionStorage 持久化状态
-    sessionStorage.removeItem('activeTask');
+    localStorage.removeItem(ACTIVE_TASK_STORAGE_KEY);
     // 断开 WebSocket
     disconnectWebSocket();
     disconnectBatchWebSocket();
@@ -1207,7 +1232,7 @@ async function handleOutlookBatchRegistration() {
         currentBatch = { batch_id: data.batch_id, ...data };
         activeBatchId = data.batch_id;  // 保存用于重连
         // 持久化到 sessionStorage，跨页面导航后可恢复
-        sessionStorage.setItem('activeTask', JSON.stringify({ batch_id: data.batch_id, mode: isOutlookBatchMode ? 'outlook_batch' : 'batch', total: data.to_register }));
+        localStorage.setItem(ACTIVE_TASK_STORAGE_KEY, JSON.stringify({ batch_id: data.batch_id, mode: isOutlookBatchMode ? 'outlook_batch' : 'batch', total: data.to_register }));
         addLog('info', `[系统] 批量任务已创建: ${data.batch_id}`);
         addLog('info', `[系统] 总数: ${data.total}, 跳过已注册: ${data.skipped}, 待注册: ${data.to_register}`);
 
@@ -1306,7 +1331,11 @@ function connectBatchWebSocket(batchId) {
 
             if (shouldPoll && currentBatch) {
                 console.log('切换到轮询模式');
-                startOutlookBatchPolling(currentBatch.batch_id);
+                if (isOutlookBatchMode) {
+                    startOutlookBatchPolling(currentBatch.batch_id);
+                } else {
+                    startBatchPolling(currentBatch.batch_id);
+                }
             }
         };
 
@@ -1314,12 +1343,20 @@ function connectBatchWebSocket(batchId) {
             console.error('批量任务 WebSocket 错误:', error);
             stopBatchWebSocketHeartbeat();
             // 切换到轮询
-            startOutlookBatchPolling(batchId);
+            if (isOutlookBatchMode) {
+                startOutlookBatchPolling(batchId);
+            } else {
+                startBatchPolling(batchId);
+            }
         };
 
     } catch (error) {
         console.error('批量任务 WebSocket 连接失败:', error);
-        startOutlookBatchPolling(batchId);
+        if (isOutlookBatchMode) {
+            startOutlookBatchPolling(batchId);
+        } else {
+            startBatchPolling(batchId);
+        }
     }
 }
 
@@ -1359,6 +1396,7 @@ function cancelBatchViaWebSocket() {
 
 // 开始轮询 Outlook 批量状态（降级方案）
 function startOutlookBatchPolling(batchId) {
+    batchLogLastIndex = 0;
     batchPollingInterval = setInterval(async () => {
         try {
             const data = await api.get(`/registration/outlook-batch/${batchId}`);
@@ -1372,15 +1410,7 @@ function startOutlookBatchPolling(batchId) {
             });
 
             // 输出日志
-            if (data.logs && data.logs.length > 0) {
-                const lastLogIndex = batchPollingInterval.lastLogIndex || 0;
-                for (let i = lastLogIndex; i < data.logs.length; i++) {
-                    const log = data.logs[i];
-                    const logType = getLogType(log);
-                    addLog(logType, log);
-                }
-                batchPollingInterval.lastLogIndex = data.logs.length;
-            }
+            appendBatchLogs(data.logs || []);
 
             // 检查是否完成
             if (data.finished) {
@@ -1404,7 +1434,6 @@ function startOutlookBatchPolling(batchId) {
         }
     }, 2000);
 
-    batchPollingInterval.lastLogIndex = 0;
 }
 
 // ============== 页面可见性重连机制 ==============
@@ -1435,14 +1464,65 @@ function initVisibilityReconnect() {
 
 // 页面加载时恢复进行中的任务（处理跨页面导航后回到注册页的情况）
 async function restoreActiveTask() {
-    const saved = sessionStorage.getItem('activeTask');
-    if (!saved) return;
+    const saved = localStorage.getItem(ACTIVE_TASK_STORAGE_KEY);
+    if (!saved) {
+        try {
+            const active = await api.get('/registration/active');
+            if (active.active_tasks && active.active_tasks.length > 0) {
+                const task = active.active_tasks[0];
+                currentTask = task;
+                activeTaskUuid = task.task_uuid;
+                taskCompleted = false;
+                taskFinalStatus = null;
+                toastShown = false;
+                displayedLogs.clear();
+                elements.startBtn.disabled = true;
+                elements.cancelBtn.disabled = false;
+                showTaskStatus(task);
+                updateTaskStatus(task.status || 'running');
+                (task.logs || []).forEach((log) => addLog(getLogType(log), log));
+                localStorage.setItem(ACTIVE_TASK_STORAGE_KEY, JSON.stringify({
+                    task_uuid: task.task_uuid,
+                    mode: 'single'
+                }));
+                addLog('info', `[系统] 检测到服务端进行中的单任务，已恢复监控 (${String(task.task_uuid).substring(0, 8)})`);
+                connectWebSocket(task.task_uuid);
+                return;
+            }
+            if (active.active_batches && active.active_batches.length > 0) {
+                const batch = active.active_batches[0];
+                currentBatch = batch;
+                activeBatchId = batch.batch_id;
+                isOutlookBatchMode = (batch.batch_type === 'outlook_batch');
+                batchCompleted = false;
+                batchFinalStatus = null;
+                toastShown = false;
+                displayedLogs.clear();
+                elements.startBtn.disabled = true;
+                elements.cancelBtn.disabled = false;
+                showBatchStatus({ count: batch.total || 0 });
+                updateBatchProgress(batch);
+                appendBatchLogs(batch.logs || []);
+                localStorage.setItem(ACTIVE_TASK_STORAGE_KEY, JSON.stringify({
+                    batch_id: batch.batch_id,
+                    mode: isOutlookBatchMode ? 'outlook_batch' : 'batch',
+                    total: batch.total || 0
+                }));
+                addLog('info', `[系统] 检测到服务端进行中的批量任务，已恢复监控 (${String(batch.batch_id).substring(0, 8)})`);
+                connectBatchWebSocket(batch.batch_id);
+                return;
+            }
+        } catch (e) {
+            console.warn('恢复服务端活动任务失败', e);
+        }
+        return;
+    }
 
     let state;
     try {
         state = JSON.parse(saved);
     } catch {
-        sessionStorage.removeItem('activeTask');
+        localStorage.removeItem(ACTIVE_TASK_STORAGE_KEY);
         return;
     }
 
@@ -1453,7 +1533,7 @@ async function restoreActiveTask() {
         try {
             const data = await api.get(`/registration/tasks/${task_uuid}`);
             if (['completed', 'failed', 'cancelled'].includes(data.status)) {
-                sessionStorage.removeItem('activeTask');
+                localStorage.removeItem(ACTIVE_TASK_STORAGE_KEY);
                 return;
             }
             // 任务仍在运行，恢复状态
@@ -1470,7 +1550,7 @@ async function restoreActiveTask() {
             addLog('info', `[系统] 检测到进行中的任务，正在重连监控... (${task_uuid.substring(0, 8)})`);
             connectWebSocket(task_uuid);
         } catch {
-            sessionStorage.removeItem('activeTask');
+            localStorage.removeItem(ACTIVE_TASK_STORAGE_KEY);
         }
     } else if ((mode === 'batch' || mode === 'outlook_batch') && batch_id) {
         // 查询批量任务是否仍在运行
@@ -1480,7 +1560,7 @@ async function restoreActiveTask() {
         try {
             const data = await api.get(endpoint);
             if (data.finished) {
-                sessionStorage.removeItem('activeTask');
+                localStorage.removeItem(ACTIVE_TASK_STORAGE_KEY);
                 return;
             }
             // 批量任务仍在运行，恢复状态
@@ -1496,9 +1576,10 @@ async function restoreActiveTask() {
             showBatchStatus({ count: total || data.total });
             updateBatchProgress(data);
             addLog('info', `[系统] 检测到进行中的批量任务，正在重连监控... (${batch_id.substring(0, 8)})`);
+            appendBatchLogs(data.logs || []);
             connectBatchWebSocket(batch_id);
         } catch {
-            sessionStorage.removeItem('activeTask');
+            localStorage.removeItem(ACTIVE_TASK_STORAGE_KEY);
         }
     }
 }

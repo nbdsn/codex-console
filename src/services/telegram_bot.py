@@ -7,15 +7,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ssl
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, List
 
 from ..config.settings import get_settings
 from ..database.models import Account
 from ..database.session import get_db
+from ..database import crud
 
 logger = logging.getLogger(__name__)
+
+TG_REGISTER_MAX_COUNT = 2_000_000
+TG_UPLOAD_OPTION_DIRECT = "直接注册"
+TG_UPLOAD_OPTION_CPA = "上传CPA"
+TG_UPLOAD_OPTION_SUB2API = "上传Sub2API"
+TG_UPLOAD_OPTION_TEAM = "上传Team Manager"
 
 
 class TelegramBotManager:
@@ -27,6 +35,8 @@ class TelegramBotManager:
         self._update_offset: int = 0
         self._active_batch_ids: Set[str] = set()
         self._batch_watchers: Dict[str, asyncio.Task] = {}
+        self._insecure_ssl_fallback: bool = False
+        self._chat_states: Dict[int, Dict[str, Any]] = {}
 
     async def start(self) -> None:
         """启动 TG 机器人（配置完整时）。"""
@@ -69,6 +79,19 @@ class TelegramBotManager:
     def _api_url(token: str, method: str) -> str:
         return f"https://api.telegram.org/bot{token}/{method}"
 
+    @staticmethod
+    def _make_ssl_context(verify: bool = True) -> ssl.SSLContext:
+        if verify:
+            return ssl.create_default_context()
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+    @staticmethod
+    def _is_cert_error(err: Exception) -> bool:
+        return "CERTIFICATE_VERIFY_FAILED" in str(err)
+
     def _request(self, token: str, method: str, payload: Optional[dict] = None) -> Dict[str, Any]:
         url = self._api_url(token, method)
         headers = {"Content-Type": "application/json"}
@@ -76,16 +99,36 @@ class TelegramBotManager:
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=35) as resp:
-            body = resp.read().decode("utf-8")
-            return json.loads(body)
+        verify = not self._insecure_ssl_fallback
+        try:
+            with urllib.request.urlopen(req, timeout=35, context=self._make_ssl_context(verify=verify)) as resp:
+                body = resp.read().decode("utf-8")
+                return json.loads(body)
+        except Exception as e:
+            if verify and self._is_cert_error(e):
+                self._insecure_ssl_fallback = True
+                logger.warning("Telegram SSL 证书校验失败，已自动切换为兼容模式（不校验证书）")
+                with urllib.request.urlopen(req, timeout=35, context=self._make_ssl_context(verify=False)) as resp:
+                    body = resp.read().decode("utf-8")
+                    return json.loads(body)
+            raise
 
     def _request_get(self, token: str, method: str, params: Optional[dict] = None) -> Dict[str, Any]:
         query = f"?{urllib.parse.urlencode(params or {})}" if params else ""
         url = f"{self._api_url(token, method)}{query}"
-        with urllib.request.urlopen(url, timeout=40) as resp:
-            body = resp.read().decode("utf-8")
-            return json.loads(body)
+        verify = not self._insecure_ssl_fallback
+        try:
+            with urllib.request.urlopen(url, timeout=40, context=self._make_ssl_context(verify=verify)) as resp:
+                body = resp.read().decode("utf-8")
+                return json.loads(body)
+        except Exception as e:
+            if verify and self._is_cert_error(e):
+                self._insecure_ssl_fallback = True
+                logger.warning("Telegram SSL 证书校验失败，已自动切换为兼容模式（不校验证书）")
+                with urllib.request.urlopen(url, timeout=40, context=self._make_ssl_context(verify=False)) as resp:
+                    body = resp.read().decode("utf-8")
+                    return json.loads(body)
+            raise
 
     async def _safe_request(self, token: str, method: str, payload: Optional[dict] = None) -> Dict[str, Any]:
         return await asyncio.to_thread(self._request, token, method, payload)
@@ -93,16 +136,19 @@ class TelegramBotManager:
     async def _safe_request_get(self, token: str, method: str, params: Optional[dict] = None) -> Dict[str, Any]:
         return await asyncio.to_thread(self._request_get, token, method, params)
 
-    async def _send_message(self, token: str, chat_id: int, text: str) -> None:
+    async def _send_message(self, token: str, chat_id: int, text: str, reply_markup: Optional[dict] = None) -> None:
         try:
-            await self._safe_request(token, "sendMessage", {"chat_id": chat_id, "text": text})
+            payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+            await self._safe_request(token, "sendMessage", payload)
         except Exception as e:
             logger.warning(f"发送 Telegram 消息失败: {e}")
 
     async def _set_commands(self, token: str) -> None:
         commands = [
             {"command": "query", "description": "查询总账号与进行中的任务状态"},
-            {"command": "register", "description": "批量注册，例: /register 50"},
+            {"command": "register", "description": "启动批量注册流程（先输入数量再选上传）"},
             {"command": "stop", "description": "停止当前由 TG 发起的注册任务"},
             {"command": "help", "description": "查看帮助"},
         ]
@@ -125,8 +171,37 @@ class TelegramBotManager:
 
         return {
             bid: data for bid, data in batch_tasks.items()
-            if not data.get("finished", False) and not data.get("cancelled", False)
+            if not data.get("finished", False)
         }
+
+    @staticmethod
+    def _build_upload_choice_keyboard() -> dict:
+        return {
+            "keyboard": [
+                [{"text": TG_UPLOAD_OPTION_DIRECT}],
+                [{"text": TG_UPLOAD_OPTION_CPA}],
+                [{"text": TG_UPLOAD_OPTION_SUB2API}],
+                [{"text": TG_UPLOAD_OPTION_TEAM}],
+            ],
+            "resize_keyboard": True,
+            "one_time_keyboard": True,
+        }
+
+    @staticmethod
+    def _hide_keyboard() -> dict:
+        return {"remove_keyboard": True}
+
+    def _pick_first_enabled_service_id(self, service_kind: str) -> Optional[int]:
+        with get_db() as db:
+            if service_kind == "cpa":
+                services = crud.get_cpa_services(db, enabled=True)
+            elif service_kind == "sub2api":
+                services = crud.get_sub2api_services(db, enabled=True)
+            elif service_kind == "tm":
+                services = crud.get_tm_services(db, enabled=True)
+            else:
+                services = []
+            return services[0].id if services else None
 
     async def _handle_query(self, token: str, chat_id: int) -> None:
         active = self._active_batches()
@@ -147,13 +222,43 @@ class TelegramBotManager:
             success = int(status.get("success", 0))
             failed = int(status.get("failed", 0))
             remaining = max(total - completed, 0)
+            mode = status.get("mode", "pipeline")
             lines.append(
-                f"- {bid[:8]}: 注册{completed}/{total}, 成功{success}, 失败{failed}, 剩余{remaining}"
+                f"- {bid[:8]}({mode}): 注册{completed}/{total}, 成功{success}, 失败{failed}, 剩余{remaining}"
             )
         await self._send_message(token, chat_id, "\n".join(lines))
 
-    async def _start_batch_from_tg(self, token: str, chat_id: int, count: int) -> None:
+    async def _start_batch_from_tg(self, token: str, chat_id: int, count: int, upload_mode: str) -> None:
         from ..web.routes.registration import BatchRegistrationRequest, create_and_start_batch_registration
+
+        auto_upload_cpa = False
+        auto_upload_sub2api = False
+        auto_upload_tm = False
+        cpa_service_ids: List[int] = []
+        sub2api_service_ids: List[int] = []
+        tm_service_ids: List[int] = []
+
+        if upload_mode == TG_UPLOAD_OPTION_CPA:
+            service_id = self._pick_first_enabled_service_id("cpa")
+            if not service_id:
+                await self._send_message(token, chat_id, "没有可用的 CPA 服务，请先在 Web 设置里启用后再试。", reply_markup=self._hide_keyboard())
+                return
+            auto_upload_cpa = True
+            cpa_service_ids = [service_id]
+        elif upload_mode == TG_UPLOAD_OPTION_SUB2API:
+            service_id = self._pick_first_enabled_service_id("sub2api")
+            if not service_id:
+                await self._send_message(token, chat_id, "没有可用的 Sub2API 服务，请先在 Web 设置里启用后再试。", reply_markup=self._hide_keyboard())
+                return
+            auto_upload_sub2api = True
+            sub2api_service_ids = [service_id]
+        elif upload_mode == TG_UPLOAD_OPTION_TEAM:
+            service_id = self._pick_first_enabled_service_id("tm")
+            if not service_id:
+                await self._send_message(token, chat_id, "没有可用的 Team Manager 服务，请先在 Web 设置里启用后再试。", reply_markup=self._hide_keyboard())
+                return
+            auto_upload_tm = True
+            tm_service_ids = [service_id]
 
         request = BatchRegistrationRequest(
             count=count,
@@ -162,18 +267,24 @@ class TelegramBotManager:
             concurrency=2,
             interval_min=4,
             interval_max=40,
-            auto_upload_cpa=True,
-            cpa_service_ids=[],
+            auto_upload_cpa=auto_upload_cpa,
+            cpa_service_ids=cpa_service_ids,
+            auto_upload_sub2api=auto_upload_sub2api,
+            sub2api_service_ids=sub2api_service_ids,
+            auto_upload_tm=auto_upload_tm,
+            tm_service_ids=tm_service_ids,
         )
         result = await create_and_start_batch_registration(request)
         self._active_batch_ids.add(result.batch_id)
         watcher = asyncio.create_task(self._watch_batch_progress(token, chat_id, result.batch_id))
         self._batch_watchers[result.batch_id] = watcher
 
+        upload_desc = upload_mode
         await self._send_message(
             token,
             chat_id,
-            f"批量注册任务已启动\n任务ID: {result.batch_id}\n数量: {count}\n模式: 流水线\n并发: 2\n间隔: 4-40 秒\n邮箱: 默认临时邮箱\n自动上传: CPA(已启用)"
+            f"批量注册任务已启动\n任务ID: {result.batch_id}\n数量: {count}\n模式: 流水线\n并发: 2\n间隔: 4-40 秒\n邮箱: 默认临时邮箱\n任务选项: {upload_desc}",
+            reply_markup=self._hide_keyboard()
         )
 
     async def _watch_batch_progress(self, token: str, chat_id: int, batch_id: str) -> None:
@@ -238,10 +349,48 @@ class TelegramBotManager:
         else:
             await self._send_message(token, chat_id, f"已提交停止请求，共 {stopped} 个任务正在收工。")
 
+    async def _handle_pending_register_flow(self, token: str, chat_id: int, text: str) -> bool:
+        state = self._chat_states.get(chat_id)
+        if not state:
+            return False
+
+        stage = state.get("stage")
+        if stage == "await_count":
+            try:
+                count = int(text)
+            except ValueError:
+                await self._send_message(token, chat_id, "注册数量必须是数字，请重新输入 1-2000000。")
+                return True
+            if count < 1 or count > TG_REGISTER_MAX_COUNT:
+                await self._send_message(token, chat_id, f"注册数量必须在 1-{TG_REGISTER_MAX_COUNT} 之间，请重新输入。")
+                return True
+            state["count"] = count
+            state["stage"] = "await_upload_mode"
+            await self._send_message(
+                token,
+                chat_id,
+                "请选择注册动作（必须选一个）:\n1) 直接注册\n2) 上传CPA\n3) 上传Sub2API\n4) 上传 Team Manager",
+                reply_markup=self._build_upload_choice_keyboard()
+            )
+            return True
+
+        if stage == "await_upload_mode":
+            upload_mode = text.strip()
+            if upload_mode not in {
+                TG_UPLOAD_OPTION_DIRECT, TG_UPLOAD_OPTION_CPA, TG_UPLOAD_OPTION_SUB2API, TG_UPLOAD_OPTION_TEAM
+            }:
+                await self._send_message(token, chat_id, "请选择菜单中的一个动作后再继续。", reply_markup=self._build_upload_choice_keyboard())
+                return True
+
+            count = int(state.get("count", 0))
+            self._chat_states.pop(chat_id, None)
+            await self._start_batch_from_tg(token, chat_id, count, upload_mode)
+            return True
+
+        return False
+
     async def _handle_command(self, token: str, admin_id: str, message: Dict[str, Any]) -> None:
         text = (message.get("text") or "").strip()
-        if not text.startswith("/"):
-            return
 
         chat_id = message.get("chat", {}).get("id")
         user_id = message.get("from", {}).get("id")
@@ -250,6 +399,12 @@ class TelegramBotManager:
 
         if not self._is_admin(user_id, admin_id):
             await self._send_message(token, chat_id, "你不是管理员，无法使用该机器人。")
+            return
+
+        if not text.startswith("/"):
+            handled = await self._handle_pending_register_flow(token, chat_id, text)
+            if not handled:
+                await self._send_message(token, chat_id, "未知输入，发送 /help 查看命令。")
             return
 
         parts = text.split()
@@ -261,7 +416,7 @@ class TelegramBotManager:
                 chat_id,
                 "可用命令:\n"
                 "/query - 查询总账号数与进行中的任务\n"
-                "/register 数量 - 启动批量注册(1-2000)\n"
+                "/register - 启动批量注册流程(1-2000000)\n"
                 "/stop - 停止当前 TG 发起任务"
             )
             return
@@ -271,21 +426,12 @@ class TelegramBotManager:
             return
 
         if cmd == "/register":
-            if len(parts) < 2:
-                await self._send_message(token, chat_id, "用法: /register 50")
-                return
-            try:
-                count = int(parts[1])
-            except ValueError:
-                await self._send_message(token, chat_id, "注册数量必须是数字。")
-                return
-            if count < 1 or count > 2000:
-                await self._send_message(token, chat_id, "注册数量必须在 1-2000 之间。")
-                return
-            await self._start_batch_from_tg(token, chat_id, count)
+            self._chat_states[chat_id] = {"stage": "await_count"}
+            await self._send_message(token, chat_id, "请输入注册数量（1-2000000）：")
             return
 
         if cmd == "/stop":
+            self._chat_states.pop(chat_id, None)
             await self._stop_active_batches(token, chat_id)
             return
 
