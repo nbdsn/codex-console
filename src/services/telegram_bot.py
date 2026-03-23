@@ -158,6 +158,17 @@ class TelegramBotManager:
         except Exception as e:
             logger.warning(f"设置 Telegram 命令失败: {e}")
 
+    async def _ensure_polling_mode(self, token: str) -> None:
+        """确保 bot 处于 long-polling 模式，避免 webhook/getUpdates 冲突。"""
+        try:
+            resp = await self._safe_request(token, "deleteWebhook", {"drop_pending_updates": False})
+            if resp.get("ok", False):
+                logger.info("Telegram 已切换为轮询模式(deleteWebhook 成功)")
+            else:
+                logger.warning(f"deleteWebhook 返回异常: {resp}")
+        except Exception as e:
+            logger.warning(f"切换 Telegram 轮询模式失败: {e}")
+
     @staticmethod
     def _is_admin(user_id: Any, admin_id: str) -> bool:
         return str(user_id).strip() == str(admin_id).strip()
@@ -275,7 +286,17 @@ class TelegramBotManager:
             auto_upload_tm=auto_upload_tm,
             tm_service_ids=tm_service_ids,
         )
-        result = await create_and_start_batch_registration(request)
+        try:
+            result = await create_and_start_batch_registration(request)
+        except Exception as e:
+            logger.exception(f"TG 启动批量注册失败(chat_id={chat_id}, count={count}, mode={upload_mode}): {e}")
+            await self._send_message(
+                token,
+                chat_id,
+                f"创建批量任务失败: {e}\n请先检查 Web 后台邮箱/上传配置，或稍后重试。",
+                reply_markup=self._hide_keyboard()
+            )
+            return
         self._active_batch_ids.add(result.batch_id)
         watcher = asyncio.create_task(self._watch_batch_progress(token, chat_id, result.batch_id))
         self._batch_watchers[result.batch_id] = watcher
@@ -385,7 +406,14 @@ class TelegramBotManager:
 
             count = int(state.get("count", 0))
             self._chat_states.pop(chat_id, None)
-            await self._start_batch_from_tg(token, chat_id, count, upload_mode)
+            await self._send_message(
+                token,
+                chat_id,
+                f"收到，正在创建任务：数量 {count}，动作 {upload_mode}。\n如果数量较大会稍慢，我会在创建成功后回复任务ID。",
+                reply_markup=self._hide_keyboard()
+            )
+            # 任务创建改为后台执行，避免阻塞 getUpdates 导致“卡住”体感。
+            asyncio.create_task(self._start_batch_from_tg(token, chat_id, count, upload_mode))
             return True
 
         return False
@@ -401,6 +429,8 @@ class TelegramBotManager:
         if not self._is_admin(user_id, admin_id):
             await self._send_message(token, chat_id, "你不是管理员，无法使用该机器人。")
             return
+
+        logger.info(f"收到 TG 输入(chat_id={chat_id}, user_id={user_id}): {text}")
 
         if not text.startswith("/"):
             handled = await self._handle_pending_register_flow(token, chat_id, text)
@@ -446,6 +476,7 @@ class TelegramBotManager:
             self._running = False
             return
 
+        await self._ensure_polling_mode(token)
         await self._set_commands(token)
         backoff_seconds = 3
 

@@ -10,6 +10,7 @@ import hmac
 import hashlib
 from typing import Optional
 from pathlib import Path
+from datetime import datetime
 
 from fastapi import FastAPI, Request, Form
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +23,8 @@ from .routes import api_router
 from .routes.websocket import router as ws_router
 from .task_manager import task_manager
 from ..services.telegram_bot import telegram_bot_manager
+from ..database.session import get_db
+from ..database.models import RegistrationTask
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +188,21 @@ def create_app() -> FastAPI:
         # 设置 TaskManager 的事件循环
         loop = asyncio.get_event_loop()
         task_manager.set_loop(loop)
+
+        # 进程重启后，上一轮 pending/running 任务无法继续执行，启动时统一清理，避免前端被“假进行中任务”锁住。
+        with get_db() as db:
+            stale_tasks = db.query(RegistrationTask).filter(
+                RegistrationTask.status.in_(["pending", "running"])
+            ).all()
+            if stale_tasks:
+                now = datetime.utcnow()
+                for task in stale_tasks:
+                    task.status = "failed"
+                    task.completed_at = now
+                    task.error_message = "程序重启后任务未恢复，已自动标记失败，请重新发起。"
+                db.commit()
+                logger.warning(f"检测到 {len(stale_tasks)} 个遗留任务，已自动标记为 failed")
+
         await telegram_bot_manager.start()
 
         logger.info("=" * 50)
