@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import ssl
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional, Set, List
@@ -446,6 +447,7 @@ class TelegramBotManager:
             return
 
         await self._set_commands(token)
+        backoff_seconds = 3
 
         while self._running:
             try:
@@ -456,7 +458,8 @@ class TelegramBotManager:
                 )
                 if not resp.get("ok", False):
                     logger.warning(f"Telegram getUpdates 返回异常: {resp}")
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(backoff_seconds)
+                    backoff_seconds = min(backoff_seconds * 2, 30)
                     continue
 
                 for item in resp.get("result", []):
@@ -466,11 +469,28 @@ class TelegramBotManager:
                     message = item.get("message")
                     if message:
                         await self._handle_command(token, admin_id, message)
+                backoff_seconds = 3
             except asyncio.CancelledError:
                 raise
+            except urllib.error.HTTPError as e:
+                # 409 通常是同一 token 存在并发轮询；429 是频率限制。两者都使用温和退避避免刷屏。
+                if e.code == 409:
+                    logger.warning("Telegram 轮询冲突(409): 检测到另一个实例正在轮询，10 秒后重试")
+                    await asyncio.sleep(10)
+                    backoff_seconds = min(max(backoff_seconds, 10), 30)
+                    continue
+                if e.code == 429:
+                    logger.warning("Telegram 触发频率限制(429): 30 秒后重试")
+                    await asyncio.sleep(30)
+                    backoff_seconds = 30
+                    continue
+                logger.warning(f"Telegram 轮询 HTTP 异常({e.code}): {e}")
+                await asyncio.sleep(backoff_seconds)
+                backoff_seconds = min(backoff_seconds * 2, 30)
             except Exception as e:
                 logger.warning(f"Telegram 轮询异常: {e}")
-                await asyncio.sleep(3)
+                await asyncio.sleep(backoff_seconds)
+                backoff_seconds = min(backoff_seconds * 2, 30)
 
 
 telegram_bot_manager = TelegramBotManager()
