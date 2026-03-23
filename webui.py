@@ -99,6 +99,9 @@ def start_webui():
         "log_level": "info" if settings.debug else "warning",
         "access_log": settings.debug,
         "ws": "websockets",
+        # 在 Windows 无控制台（windowed）打包场景下，stderr 可能为 None，
+        # uvicorn 默认 formatter 会调用 isatty() 导致崩溃，这里关闭其默认日志配置。
+        "log_config": None,
     }
 
     logger = logging.getLogger(__name__)
