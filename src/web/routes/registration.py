@@ -897,47 +897,103 @@ async def create_and_start_batch_registration(request: BatchRegistrationRequest)
         raise HTTPException(status_code=400, detail="模式必须为 parallel 或 pipeline")
 
     batch_id = str(uuid.uuid4())
-    task_uuids: List[str] = []
 
-    with get_db() as db:
-        for _ in range(request.count):
-            task_uuid = str(uuid.uuid4())
-            crud.create_registration_task(
-                db,
-                task_uuid=task_uuid,
-                proxy=request.proxy
+    # 先创建“初始化中”批量状态，保证前端轮询时不会 404 卡住。
+    task_manager.init_batch(batch_id, request.count)
+    batch_tasks[batch_id] = {
+        "batch_id": batch_id,
+        "total": request.count,
+        "completed": 0,
+        "success": 0,
+        "failed": 0,
+        "consecutive_failed": 0,
+        "max_consecutive_failures": MAX_CONSECUTIVE_FAILURES,
+        "cancelled": False,
+        "task_uuids": [],
+        "current_index": 0,
+        "logs": ["[系统] 正在初始化批量任务，请稍候..."],
+        "finished": False,
+        "status": "preparing",
+        "created_at": datetime.utcnow().isoformat(),
+        "stop_reason": None,
+        "mode": request.mode,
+        "batch_type": "batch",
+    }
+    task_manager.add_batch_log(batch_id, "[系统] 正在初始化批量任务，请稍候...")
+
+    async def _prepare_and_start_batch() -> None:
+        task_uuids: List[str] = []
+        chunk_size = 500
+        pending_rows: List[dict] = []
+
+        try:
+            with get_db() as db:
+                for i in range(request.count):
+                    if batch_tasks.get(batch_id, {}).get("cancelled", False):
+                        batch_tasks[batch_id]["finished"] = True
+                        batch_tasks[batch_id]["status"] = "cancelled"
+                        batch_tasks[batch_id]["stop_reason"] = "手动停止"
+                        task_manager.update_batch_status(batch_id, finished=True, status="cancelled", stop_reason="手动停止")
+                        task_manager.add_batch_log(batch_id, "[系统] 初始化阶段已取消")
+                        return
+
+                    task_uuid = str(uuid.uuid4())
+                    task_uuids.append(task_uuid)
+                    pending_rows.append({
+                        "task_uuid": task_uuid,
+                        "status": "pending",
+                        "proxy": request.proxy,
+                    })
+
+                    if len(pending_rows) >= chunk_size:
+                        db.bulk_insert_mappings(RegistrationTask, pending_rows)
+                        db.commit()
+                        pending_rows.clear()
+                        # 每 5000 个输出一次初始化进度日志
+                        if (i + 1) % 5000 == 0:
+                            msg = f"[系统] 初始化中: {i + 1}/{request.count}"
+                            task_manager.add_batch_log(batch_id, msg)
+                            batch_tasks[batch_id]["logs"].append(msg)
+                        await asyncio.sleep(0)
+
+                if pending_rows:
+                    db.bulk_insert_mappings(RegistrationTask, pending_rows)
+                    db.commit()
+
+            await run_batch_registration(
+                batch_id,
+                task_uuids,
+                request.email_service_type,
+                request.proxy,
+                request.email_service_config,
+                request.email_service_id,
+                request.interval_min,
+                request.interval_max,
+                request.concurrency,
+                request.mode,
+                request.auto_upload_cpa,
+                request.cpa_service_ids,
+                request.auto_upload_sub2api,
+                request.sub2api_service_ids,
+                request.auto_upload_tm,
+                request.tm_service_ids,
+                "batch",
             )
-            task_uuids.append(task_uuid)
+        except Exception as e:
+            logger.error(f"批量任务初始化失败 {batch_id}: {e}")
+            batch_tasks[batch_id]["finished"] = True
+            batch_tasks[batch_id]["status"] = "failed"
+            batch_tasks[batch_id]["stop_reason"] = str(e)
+            batch_tasks[batch_id]["logs"].append(f"[错误] 初始化失败: {e}")
+            task_manager.update_batch_status(batch_id, finished=True, status="failed", stop_reason=str(e))
+            task_manager.add_batch_log(batch_id, f"[错误] 初始化失败: {e}")
 
-    with get_db() as db:
-        tasks = [crud.get_registration_task(db, tid) for tid in task_uuids]
-
-    asyncio.create_task(
-        run_batch_registration(
-            batch_id,
-            task_uuids,
-            request.email_service_type,
-            request.proxy,
-            request.email_service_config,
-            request.email_service_id,
-            request.interval_min,
-            request.interval_max,
-            request.concurrency,
-            request.mode,
-            request.auto_upload_cpa,
-            request.cpa_service_ids,
-            request.auto_upload_sub2api,
-            request.sub2api_service_ids,
-            request.auto_upload_tm,
-            request.tm_service_ids,
-            "batch",
-        )
-    )
+    asyncio.create_task(_prepare_and_start_batch())
 
     return BatchRegistrationResponse(
         batch_id=batch_id,
         count=request.count,
-        tasks=[task_to_response(t) for t in tasks if t]
+        tasks=[]
     )
 
 @router.post("/start", response_model=RegistrationTaskResponse)

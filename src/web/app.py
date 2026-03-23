@@ -10,7 +10,7 @@ import hmac
 import hashlib
 from typing import Optional
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request, Form
 from fastapi.staticfiles import StaticFiles
@@ -203,18 +203,26 @@ def create_app() -> FastAPI:
         task_manager.set_loop(loop)
 
         # 进程重启后，上一轮 pending/running 任务无法继续执行，启动时统一清理，避免前端被“假进行中任务”锁住。
+        # 仅清理“较早创建”的遗留任务，避免把刚创建的任务误判；使用批量 SQL 更新，减少启动卡顿。
         with get_db() as db:
-            stale_tasks = db.query(RegistrationTask).filter(
-                RegistrationTask.status.in_(["pending", "running"])
-            ).all()
-            if stale_tasks:
+            cutoff = datetime.utcnow() - timedelta(minutes=2)
+            stale_query = db.query(RegistrationTask).filter(
+                RegistrationTask.status.in_(["pending", "running"]),
+                RegistrationTask.created_at < cutoff
+            )
+            stale_count = stale_query.count()
+            if stale_count > 0:
                 now = datetime.utcnow()
-                for task in stale_tasks:
-                    task.status = "failed"
-                    task.completed_at = now
-                    task.error_message = "程序重启后任务未恢复，已自动标记失败，请重新发起。"
+                stale_query.update(
+                    {
+                        RegistrationTask.status: "failed",
+                        RegistrationTask.completed_at: now,
+                        RegistrationTask.error_message: "程序重启后任务未恢复，已自动标记失败，请重新发起。"
+                    },
+                    synchronize_session=False
+                )
                 db.commit()
-                logger.warning(f"检测到 {len(stale_tasks)} 个遗留任务，已自动标记为 failed")
+                logger.warning(f"检测到 {stale_count} 个遗留任务，已自动标记为 failed")
 
         await telegram_bot_manager.start()
 
