@@ -5,6 +5,9 @@ Sub2API 账号上传功能
 
 import json
 import logging
+import ssl
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from typing import List, Tuple, Optional
 
@@ -14,6 +17,46 @@ from ...database.session import get_db
 from ...database.models import Account
 
 logger = logging.getLogger(__name__)
+
+
+def _build_error_message_from_response(status_code: int, response_text: str, fallback: str) -> str:
+    """统一解析错误返回，尽量给出服务端 message。"""
+    error_msg = f"{fallback}: HTTP {status_code}"
+    try:
+        detail = json.loads(response_text) if response_text else {}
+        if isinstance(detail, dict):
+            error_msg = detail.get("message", error_msg)
+    except Exception:
+        if response_text:
+            error_msg = f"{error_msg} - {response_text[:200]}"
+    return error_msg
+
+
+def _post_sub2api_with_curl(url: str, payload: dict, headers: dict, timeout: int, impersonate: Optional[str]) -> Tuple[int, str]:
+    """使用 curl_cffi 发送 POST，返回 (status_code, text)。"""
+    response = cffi_requests.post(
+        url,
+        json=payload,
+        headers=headers,
+        proxies=None,
+        timeout=timeout,
+        impersonate=impersonate,
+    )
+    return int(response.status_code), response.text or ""
+
+
+def _post_sub2api_with_urllib(url: str, payload: dict, headers: dict, timeout: int) -> Tuple[int, str]:
+    """urllib 兜底上传（Windows 上可绕过部分 curl TLS/连接兼容问题）。"""
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    ctx = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            return int(resp.status), body
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else str(e)
+        return int(e.code), body
 
 
 def upload_to_sub2api(
@@ -105,31 +148,33 @@ def upload_to_sub2api(
         "Idempotency-Key": f"import-{exported_at}",
     }
 
-    try:
-        response = cffi_requests.post(
-            url,
-            json=payload,
-            headers=headers,
-            proxies=None,
-            timeout=30,
-            impersonate="chrome110",
-        )
+    # Windows 兼容策略：
+    # 1) curl_cffi + impersonate
+    # 2) curl_cffi 无 impersonate
+    # 3) urllib 兜底
+    attempts = [
+        ("curl_chrome110", lambda: _post_sub2api_with_curl(url, payload, headers, timeout=30, impersonate="chrome110")),
+        ("curl_plain", lambda: _post_sub2api_with_curl(url, payload, headers, timeout=30, impersonate=None)),
+        ("urllib", lambda: _post_sub2api_with_urllib(url, payload, headers, timeout=30)),
+    ]
 
-        if response.status_code in (200, 201):
-            return True, f"成功上传 {len(account_items)} 个账号"
-
-        error_msg = f"上传失败: HTTP {response.status_code}"
+    last_error = "未知错误"
+    for name, runner in attempts:
         try:
-            detail = response.json()
-            if isinstance(detail, dict):
-                error_msg = detail.get("message", error_msg)
-        except Exception:
-            error_msg = f"{error_msg} - {response.text[:200]}"
-        return False, error_msg
+            status_code, body = runner()
+            if status_code in (200, 201):
+                if name != "curl_chrome110":
+                    logger.warning(f"Sub2API 上传已通过回退通道成功: {name}")
+                return True, f"成功上传 {len(account_items)} 个账号"
 
-    except Exception as e:
-        logger.error(f"Sub2API 上传异常: {e}")
-        return False, f"上传异常: {str(e)}"
+            # 有 HTTP 状态码说明服务端已响应，直接返回该错误，避免重复请求
+            return False, _build_error_message_from_response(status_code, body, "上传失败")
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"Sub2API 上传通道失败({name}): {e}")
+
+    logger.error(f"Sub2API 上传异常（所有通道均失败）: {last_error}")
+    return False, f"上传异常: {last_error}"
 
 
 def batch_upload_to_sub2api(
@@ -198,6 +243,7 @@ def test_sub2api_connection(api_url: str, api_key: str) -> Tuple[bool, str]:
     url = api_url.rstrip("/") + "/api/v1/admin/accounts/data"
     headers = {"x-api-key": api_key}
 
+    status_code: Optional[int] = None
     try:
         response = cffi_requests.get(
             url,
@@ -206,19 +252,22 @@ def test_sub2api_connection(api_url: str, api_key: str) -> Tuple[bool, str]:
             timeout=10,
             impersonate="chrome110",
         )
+        status_code = int(response.status_code)
+    except Exception as first_err:
+        logger.warning(f"Sub2API 连接测试 curl 通道失败，尝试 urllib 回退: {first_err}")
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=10, context=ssl.create_default_context()) as resp:
+                status_code = int(resp.status)
+        except urllib.error.HTTPError as e:
+            status_code = int(e.code)
+        except Exception as e:
+            return False, f"连接测试失败: {str(e)}"
 
-        if response.status_code in (200, 201, 204, 405):
-            return True, "Sub2API 连接测试成功"
-        if response.status_code == 401:
-            return False, "连接成功，但 API Key 无效"
-        if response.status_code == 403:
-            return False, "连接成功，但权限不足"
-
-        return False, f"服务器返回异常状态码: {response.status_code}"
-
-    except cffi_requests.exceptions.ConnectionError as e:
-        return False, f"无法连接到服务器: {str(e)}"
-    except cffi_requests.exceptions.Timeout:
-        return False, "连接超时，请检查网络配置"
-    except Exception as e:
-        return False, f"连接测试失败: {str(e)}"
+    if status_code in (200, 201, 204, 405):
+        return True, "Sub2API 连接测试成功"
+    if status_code == 401:
+        return False, "连接成功，但 API Key 无效"
+    if status_code == 403:
+        return False, "连接成功，但权限不足"
+    return False, f"服务器返回异常状态码: {status_code}"
