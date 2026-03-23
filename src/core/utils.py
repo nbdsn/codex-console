@@ -53,11 +53,18 @@ def setup_logging(
     # 创建格式化器
     formatter = logging.Formatter(log_format)
 
-    # 控制台处理器
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    console_handler.setLevel(numeric_level)
-    root_logger.addHandler(console_handler)
+    # 控制台处理器（兼容 windowed/no-console 场景）
+    stream = None
+    if getattr(sys, "stdout", None) is not None and hasattr(sys.stdout, "write"):
+        stream = sys.stdout
+    elif getattr(sys, "stderr", None) is not None and hasattr(sys.stderr, "write"):
+        stream = sys.stderr
+
+    if stream is not None:
+        console_handler = logging.StreamHandler(stream)
+        console_handler.setFormatter(formatter)
+        console_handler.setLevel(numeric_level)
+        root_logger.addHandler(console_handler)
 
     # 文件处理器（如果指定了日志文件）
     if log_file:
