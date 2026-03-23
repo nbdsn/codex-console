@@ -96,6 +96,28 @@ def create_app() -> FastAPI:
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.globals["static_version"] = _build_static_asset_version(STATIC_DIR)
 
+    def _render_template(name: str, request: Request, context: Optional[dict] = None, status_code: int = 200):
+        """
+        兼容不同 Starlette 版本的 TemplateResponse 签名。
+        新版本支持 request/name/context 关键字；旧版本是 (name, context, ...）。
+        """
+        merged_context = {"request": request}
+        if context:
+            merged_context.update(context)
+        try:
+            return templates.TemplateResponse(
+                request=request,
+                name=name,
+                context=merged_context,
+                status_code=status_code
+            )
+        except TypeError:
+            return templates.TemplateResponse(
+                name,
+                merged_context,
+                status_code=status_code
+            )
+
     def _auth_token(password: str) -> str:
         secret = get_settings().webui_secret_key.get_secret_value().encode("utf-8")
         return hmac.new(secret, password.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -111,23 +133,14 @@ def create_app() -> FastAPI:
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request, next: Optional[str] = "/"):
         """登录页面"""
-        return templates.TemplateResponse(
-            request=request,
-            name="login.html",
-            context={"request": request, "error": "", "next": next or "/"}
-        )
+        return _render_template("login.html", request, {"error": "", "next": next or "/"})
 
     @app.post("/login")
     async def login_submit(request: Request, password: str = Form(...), next: Optional[str] = "/"):
         """处理登录提交"""
         expected = get_settings().webui_access_password.get_secret_value()
         if not secrets.compare_digest(password, expected):
-            return templates.TemplateResponse(
-                request=request,
-                name="login.html",
-                context={"request": request, "error": "密码错误", "next": next or "/"},
-                status_code=401
-            )
+            return _render_template("login.html", request, {"error": "密码错误", "next": next or "/"}, status_code=401)
 
         response = RedirectResponse(url=next or "/", status_code=302)
         response.set_cookie("webui_auth", _auth_token(expected), httponly=True, samesite="lax")
@@ -145,33 +158,33 @@ def create_app() -> FastAPI:
         """首页 - 注册页面"""
         if not _is_authenticated(request):
             return _redirect_to_login(request)
-        return templates.TemplateResponse(request=request, name="index.html", context={"request": request})
+        return _render_template("index.html", request)
 
     @app.get("/accounts", response_class=HTMLResponse)
     async def accounts_page(request: Request):
         """账号管理页面"""
         if not _is_authenticated(request):
             return _redirect_to_login(request)
-        return templates.TemplateResponse(request=request, name="accounts.html", context={"request": request})
+        return _render_template("accounts.html", request)
 
     @app.get("/email-services", response_class=HTMLResponse)
     async def email_services_page(request: Request):
         """邮箱服务管理页面"""
         if not _is_authenticated(request):
             return _redirect_to_login(request)
-        return templates.TemplateResponse(request=request, name="email_services.html", context={"request": request})
+        return _render_template("email_services.html", request)
 
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request):
         """设置页面"""
         if not _is_authenticated(request):
             return _redirect_to_login(request)
-        return templates.TemplateResponse(request=request, name="settings.html", context={"request": request})
+        return _render_template("settings.html", request)
 
     @app.get("/payment", response_class=HTMLResponse)
     async def payment_page(request: Request):
         """支付页面"""
-        return templates.TemplateResponse(request=request, name="payment.html", context={"request": request})
+        return _render_template("payment.html", request)
 
     @app.on_event("startup")
     async def startup_event():
